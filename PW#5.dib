@@ -29,6 +29,7 @@
 #!csharp
 
 #r "nuget: xunit, 2.8.1"
+using System.Collections.Concurrent;
 using System.Threading;
 using Xunit;
 
@@ -38,29 +39,51 @@ class Message
     int id;
     public Message()
     {
-        id = Thread.CurrentThread.ManagedThreadId;
+        id = Thread.CurrentThread.ManagedThreadId;//идентификатора текущего потока при создании сообщения
     }
 
     public void Handle()
     {
-        Interlocked.Increment(ref messageHandled);
-        Assert.NotEqual(id, Thread.CurrentThread.ManagedThreadId);
+        Interlocked.Increment(ref messageHandled);//атомарная операция увеличения значения +
+        Assert.NotEqual(id, Thread.CurrentThread.ManagedThreadId);//проверка что сообщение обрабатывается разными потоками ?
     }
 
     public static void Check()
     {
-        Assert.Equal(200, messageHandled);
+        Assert.Equal(200, messageHandled);//проверка что обработано было только 200 сообщений +
     }
 }
-
-#!csharp
-
-using System.Collections.Concurrent;
 
 var queue1 = new BlockingCollection<Message>(2); //очередь первого потока
 var queue2 = new BlockingCollection<Message>(2); //очередь второго потока
 
-// Здесь писать решение
+Thread thread1 = new Thread(()=> Ping(queue1, queue2));
+Thread thread2 = new Thread(()=> Pong(queue2, queue1));
+
+thread1.Start(); thread2.Start(); //запуск потоков
+
+thread1.Join(); thread2.Join();//ожидаем завершение потоков
+
+void Ping(BlockingCollection<Message> queue1, BlockingCollection<Message> queue2)
+{
+    for (int i=0; i<100; i++)
+    {
+        queue2.Add(new Message());//доюовляем сообщение в очередь2
+        queue1.Take().Handle();//берем сообщение из очереди1 и выполняем операцию
+    }
+}
+
+void Pong(BlockingCollection<Message> queue1, BlockingCollection<Message> queue2)
+{
+    for (int i=0; i<100; i++)
+    {
+        queue1.Take().Handle();
+        queue2.Add(new Message());
+    }
+}
+
+/*не знаю правильно ли я выполнил задание, но я понял что мы должны обрабатывать сообщения по очереди используя 
+только 2 потока производитель-потребитель. Однин поток обрабаитывает сообщение и затем создает запрос на второй поток.*/
 
 #!csharp
 
