@@ -41,6 +41,215 @@
 
 // здесь писать код
 
+#!csharp
+
+using System;
+using System.Diagnostics;
+using System.Collections.Concurrent;
+using System.Threading;
+using System.Threading.Tasks;
+
+   static (double, double) TimeBlockingCollection()
+    {
+        BlockingCollection<int> blockingCollection = new BlockingCollection<int>();
+        Stopwatch stopwatch = new Stopwatch();
+        Stopwatch stopwatch1 = new Stopwatch();
+        ManualResetEventSlim startWaitThread = new ManualResetEventSlim(false);
+        ManualResetEventSlim startReadyThread = new ManualResetEventSlim(false);
+
+        //производитель
+        Task thread1 = Task.Run(() =>{
+            startReadyThread.Set();
+            startWaitThread.Wait();
+            stopwatch.Start();
+
+            for (int i = 0; i<1000000; i++) blockingCollection.Add(i);
+
+            blockingCollection.CompleteAdding();});
+
+        //потребитель
+        Task thread2 = Task.Run(() => {
+            startReadyThread.Set();
+            startWaitThread.Wait();
+            stopwatch1.Start();
+
+            //потребитель просматривает все сообщения!
+            foreach (var item in blockingCollection.GetConsumingEnumerable());
+
+            stopwatch1.Stop();stopwatch.Stop();});
+
+        startReadyThread.Wait();
+        startWaitThread.Set(); 
+        
+        Task.WaitAll(thread1, thread2);
+        
+        //Console.WriteLine(stopwatch1.ElapsedMilliseconds);
+        //Console.WriteLine(stopwatch.ElapsedMilliseconds);
+        return (stopwatch1.ElapsedMilliseconds,stopwatch.ElapsedMilliseconds);
+    }
+
+#!csharp
+
+static (double, double) TimeConcurrentQueue()
+    {
+        ConcurrentQueue<int> concurrentQueue = new ConcurrentQueue<int>();
+        Stopwatch stopwatch = new Stopwatch();
+        Stopwatch stopwatch1 = new Stopwatch();
+        ManualResetEventSlim startWaitThread = new ManualResetEventSlim(false);
+        ManualResetEventSlim startReadyThread = new ManualResetEventSlim(false);
+        ManualResetEventSlim compleat = new ManualResetEventSlim(false);//синхронизация для обработки всех сообщений
+
+        //производитель
+        Task thread1 = Task.Run(() =>{
+            startReadyThread.Set();
+            startWaitThread.Wait();
+            stopwatch.Start();
+            
+            for (int i=0; i< 1000000; i++) concurrentQueue.Enqueue(i);
+            compleat.Set();});
+        //потребитель
+        Task thread2 = Task.Run(() =>{
+            startReadyThread.Set();
+            startWaitThread.Wait();
+            stopwatch1.Start();
+            
+            //потребитель который обрабатывает все сообщения
+            while (!compleat.IsSet || !concurrentQueue.IsEmpty)
+                concurrentQueue.TryDequeue(out _ );
+            stopwatch1.Stop();stopwatch.Stop();});
+
+        startReadyThread.Wait();
+        startWaitThread.Set(); 
+
+        Task.WaitAll(thread1, thread2);
+        //Console.WriteLine(stopwatch1.ElapsedMilliseconds);
+        //Console.WriteLine(stopwatch.ElapsedMilliseconds);
+       return (stopwatch1.ElapsedMilliseconds,stopwatch.ElapsedMilliseconds);
+    }
+
+#!csharp
+
+static (double, double) TimeQueue()
+    {
+        Queue<int> queue = new Queue<int>();
+        Stopwatch stopwatch = new Stopwatch();
+        Stopwatch stopwatch1 = new Stopwatch();
+
+        //производитель
+        stopwatch.Start();
+        for (int i = 0; i < 1000000; i++) queue.Enqueue(i);
+
+        //потребитель
+        stopwatch1.Start();
+        for (int i = 0; i < 1000000; i++)queue.Dequeue();
+        stopwatch1.Stop();stopwatch.Stop();        
+        
+        //Console.WriteLine(stopwatch1.ElapsedMilliseconds);
+        //Console.WriteLine(stopwatch.ElapsedMilliseconds);
+        return (stopwatch1.ElapsedMilliseconds,stopwatch.ElapsedMilliseconds);
+    }    
+
+#!csharp
+
+List<double> timeBlockingCollection1 = new List<double>();
+List<double> timeBlockingCollection = new List<double>();
+List<double> timeConcurrentQueue1 = new List<double>();
+List<double> timeConcurrentQueue = new List<double>();
+List<double> timeQueue1 = new List<double>();
+List<double> timeQueue = new List<double>();
+
+for (int i= 0; i < 10; i++)
+    {
+        var result1 = TimeBlockingCollection();
+        timeBlockingCollection1.Add(result1.Item1);
+        timeBlockingCollection.Add(result1.Item2);
+
+        var result2 = TimeConcurrentQueue();
+        timeConcurrentQueue1.Add(result2.Item1);
+        timeConcurrentQueue.Add(result2.Item2);
+
+        var result3 = TimeQueue();
+        timeQueue1.Add(result3.Item1);
+        timeQueue.Add(result3.Item2);
+    }
+
+    Console.WriteLine($"(BlockingCollection) Среднее время обработки: {Average(timeBlockingCollection1)} | среднее время Записи и Чтения: {Average(timeBlockingCollection)}");
+    Console.WriteLine($"(ConcurrentQueue) Среднее время обработки: {Average(timeConcurrentQueue1)} | среднее время Записи и Чтения: {Average(timeConcurrentQueue)}");
+    Console.WriteLine($"(Queue) Среднее время обработки: {Average(timeQueue1)} | среднее время Записи и Чтения: {Average(timeQueue)}");
+    Console.WriteLine($"Потокобезопасная коллекция ConcurrentQueue на {Math.Round(((-Average(timeQueue) + Average(timeConcurrentQueue)) / Average(timeConcurrentQueue)) * 100,2)}% медленнее по сравнению с обычной очередью в данном примере.");
+
+static double Average(List<double> list)
+    {
+        double answer = 0;
+        foreach (var line in list)
+            answer += line;
+        return answer / list.Count;
+    }
+
 #!markdown
 
-## Вывод
+### Вывод
+В данном примере наглядно видно, что небезопасная очередь оказалась быстрее потокобезопасных структур данных, таких как `BlockingCollection` и `ConcurrentQueue`. Это можно объяснить несколькими факторами. Во-первых, в многопоточных вычислениях необходима синхронизация для предотвращения гонок данных и обеспечения корректного доступа к разделяемым ресурсам. Эта синхронизация, будь то блокировки или другие механизмы, добавляет накладные расходы. Во-вторых, создание и управление потоками само по себе также требует ресурсов. Это может нивелировать выигрыш от параллельного выполнения, особенно если задачи требуют частой синхронизации или короткие по времени выполнения. Наконец, однопоточные алгоритмы, работающие с небезопасными очередями, могут быть более эффективными в тех случаях, когда затраты на синхронизацию превышают выгоды от параллельного выполнения. Можно сделать вывод, что многопоточность не всегда дает буст в работе программы. В данном примере многопоточность усложнена синхронизацией, которая тоже тратит ресурсы машины помимо самих вычислений.
+
+`ConcurrentQueue` оказывается в работе намного быстрее, чем `BlockingCollection`, несмотря на встроенные методы `GetConsumingEnumerable` и `blockingCollection.CompleteAdding` в `BlockingCollection`, которые упрощают и экономят ресурсы машины при синхронизации данных. Мы усложнили работу с `ConcurrentQueue` дополнительной синхронизацией с помощью `ManualResetEventSlim compleat = new ManualResetEventSlim(false)`, но даже при этом она оказалась быстрее, чем `BlockingCollection`. На момент тестерования потокобезопасная коллекция `ConcurrentQueue` на **57,14%** медленнее по сравнению с обычной очередью в данном примере.
+
+#!csharp
+
+#r "nuget:ScottPlot, 5.0.36"
+using Microsoft.DotNet.Interactive.Formatting;
+Formatter.Register(typeof(ScottPlot.Plot), (p, w) => 
+    w.Write(((ScottPlot.Plot)p).GetImageHtml(550, 550)), HtmlFormatter.MimeType);
+double[] dataX = new double[] { 1,2,3,4,5,6,7,8,9,10 };
+
+// plot the data
+ScottPlot.Plot plt = new();
+plt.Title("Время работы BlockingCollection");
+plt.XLabel("Запуск");
+plt.YLabel("Время выполнения мс");
+plt.Add.Scatter(dataX, timeBlockingCollection.ToArray());
+plt.Add.Scatter(dataX, timeBlockingCollection1.ToArray());
+
+// display the plot
+plt
+
+#!csharp
+
+#r "nuget:ScottPlot, 5.0.36"
+using Microsoft.DotNet.Interactive.Formatting;
+Formatter.Register(typeof(ScottPlot.Plot), (p, w) => 
+    w.Write(((ScottPlot.Plot)p).GetImageHtml(550, 550)), HtmlFormatter.MimeType);
+int[] dataX = new int[] { 1,2,3,4,5,6,7,8,9,10 };
+
+// plot the data
+ScottPlot.Plot plt = new();
+plt.Title("Время работы ConcurrentQueue");
+plt.XLabel("Запуск");
+plt.YLabel("Время выполнения мс");
+plt.Add.Scatter(dataX, timeConcurrentQueue.ToArray());
+plt.Add.Scatter(dataX, timeConcurrentQueue1.ToArray());
+// display the plot
+plt
+
+#!csharp
+
+#r "nuget:ScottPlot, 5.0.36"
+using Microsoft.DotNet.Interactive.Formatting;
+Formatter.Register(typeof(ScottPlot.Plot), (p, w) => 
+    w.Write(((ScottPlot.Plot)p).GetImageHtml(550, 550)), HtmlFormatter.MimeType);
+int[] dataX = new int[] { 1,2,3,4,5,6,7,8,9,10 };
+
+// plot the data
+ScottPlot.Plot plt = new();
+plt.Title("Время работы Queue");
+plt.XLabel("Запуск");
+plt.YLabel("Время выполнения мс");
+plt.Add.Scatter(dataX, timeQueue.ToArray());
+plt.Add.Scatter(dataX, timeQueue1.ToArray());
+// display the plot
+plt
+
+#!markdown
+
+### Анализ графов и тестов
+
+Из графов и тестов видно, что желтая ветка перекрывает синюю ветку графа в `BlockingCollection` и `ConcurrentQueue`, и в некоторых тестах значения различаются. В графах это означает, что разница во времени в 1 мс отсутствует или она настолько мала, что на графе она еле различима. Это показывает, что не всегда потоки работаю с одиноковой скоростью и тратят одно и тоже время, поэтому синхронизация необходима!
