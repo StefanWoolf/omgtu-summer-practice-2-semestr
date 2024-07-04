@@ -35,12 +35,322 @@
 
 #!csharp
 
+/*Добавление команд:
+Команды добавляются в планировщик с помощью метода Add.
+Если команда является длительной, она оборачивается в RepeatingCommand, чтобы автоматически возвращаться в планировщик.
+
+Выполнение команд:
+Планировщик выбирает команды для выполнения с помощью метода Select.
+Если команда не завершена, обёртка RepeatingCommand добавляет её обратно в планировщик.*/
+
+using System;
+using System.Collections.Concurrent;
+using System.Threading;
+
+public interface ICommand
+{
+    void Execute();
+    bool IsCompleted { get; }
+}
+
 public interface IScheduler
 {
-    bool HasCommand()
+    bool HasCommand();
     ICommand Select();
     void Add(ICommand cmd);
 }
+
+public class Scheduler : IScheduler
+{
+    ConcurrentQueue<ICommand> queueCommands = new ConcurrentQueue<ICommand>();
+
+    public bool HasCommand()
+    {
+        return !queueCommands.IsEmpty;
+    }
+
+    public ICommand Select()
+    {
+        if (queueCommands.TryDequeue(out ICommand cmd))
+        {
+            return cmd;
+        }
+        return null;
+    }
+
+    public void Add(ICommand cmd)
+    {
+        queueCommands.Enqueue(cmd);
+    }
+}
+
+public class RepeatingCommand : ICommand
+{
+    ICommand Command;
+    IScheduler Scheduler;
+
+    public RepeatingCommand(ICommand command, IScheduler scheduler)
+    {
+        Command = command;
+        Scheduler = scheduler;
+    }
+
+    public void Execute()
+    {
+        Command.Execute();
+        if (!Command.IsCompleted)
+        {
+            Scheduler.Add(this);
+        }
+    }
+
+    public bool IsCompleted
+    {
+        get { return Command.IsCompleted; }
+    }
+}
+
+public class ServerThread
+{
+    public Thread threadServerLogic { get; set; }
+    BlockingCollection<ICommand> queueServerCommands = new BlockingCollection<ICommand>();
+    ManualResetEvent flag = new ManualResetEvent(false);
+    ManualResetEvent hardStopFlag = new ManualResetEvent(false);
+    ManualResetEvent softStopFlag = new ManualResetEvent(false);
+    public IScheduler scheduler = new Scheduler();
+
+
+   public ServerThread()
+    {
+        threadServerLogic = new Thread(() => RunServer());
+        threadServerLogic.Start();
+    }
+
+    public void RunServer()
+    {
+        while (true)
+        {
+            flag.WaitOne();
+            flag.Reset();
+
+            if (hardStopFlag.WaitOne(0))
+                break;
+
+            if (softStopFlag.WaitOne(0))
+            {
+                Console.WriteLine("Плавная остановка сервера");
+                CompleteCommands();
+                break;
+            }
+
+            ICommand command;
+            while (queueServerCommands.TryTake(out command, TimeSpan.Zero))
+            {
+                try
+                {
+                    if (hardStopFlag.WaitOne(0))
+                        break;
+                    command.Execute();
+                    if (!command.IsCompleted)
+                    {
+                        queueServerCommands.Add(command);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    HandleException(command, ex);
+                }
+            }
+
+            if (hardStopFlag.WaitOne(0))
+                break;
+
+            while (scheduler.HasCommand())
+            {
+                if (hardStopFlag.WaitOne(0))
+                    break;
+
+                ICommand schedCommand = scheduler.Select();
+                schedCommand.Execute();
+            }
+        }
+    }
+
+    private void CompleteCommands()
+    {
+        while (scheduler.HasCommand())
+        {
+            ICommand schedCommand = scheduler.Select();
+            schedCommand?.Execute();
+        }
+
+        while (!queueServerCommands.IsCompleted && queueServerCommands.TryTake(out ICommand command))
+        {
+            command.Execute();
+        }
+    }
+
+    public void AddCommand(ICommand command)
+    {
+        if (!queueServerCommands.IsAddingCompleted && !softStopFlag.WaitOne(0))
+        {
+            queueServerCommands.Add(command);
+            Console.WriteLine($"Команда: {command.GetType().Name} добавлена в очередь");
+        }
+        else
+        {
+            Console.WriteLine($"Невозможно добавить команду: {command.GetType().Name} (очередь завершена)");
+        }
+        flag.Set();
+    }
+
+    public void HardStopHelp()
+    {
+        hardStopFlag.Set();
+        flag.Set();
+        queueServerCommands.CompleteAdding();
+        Console.WriteLine("Добавление в очередь прекращено");
+    }
+
+    public void SoftStopHelp()
+    {
+        softStopFlag.Set();
+        flag.Set();
+        //queueServerCommands.CompleteAdding();
+        //Console.WriteLine("Добавление в очередь прекращено");
+    }
+
+    public void HandleException(ICommand command, Exception ex)
+    {
+        Console.WriteLine($"Сработало исключение для команды {command.GetType().Name} | {ex.Message}");
+    }
+}
+
+public class HardStop : ICommand
+{
+    public ServerThread serverThread { get; set; }
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread == serverThread.threadServerLogic)
+        {
+            Console.WriteLine("ЖЕСТКАЯ ОСТАНОВКА!!!");
+            serverThread.HardStopHelp();
+        }
+        else
+            throw new InvalidOperationException("ERROR: HardStop может выполняться только потоком сервера");
+    }
+
+    public bool IsCompleted
+    {
+        get { return true; }
+    }
+}
+
+public class SoftStop : ICommand
+{
+    public ServerThread serverThread { get; set; }
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread == serverThread.threadServerLogic)
+        {
+            Console.WriteLine("НАЧАЛАСЬ ПЛАВНАЯ ОСТАНОВКА!!!");
+            serverThread.SoftStopHelp();
+        }
+        else
+            throw new InvalidOperationException("ERROR: SoftStop может выполняться только потоком сервера");
+    }
+
+    public bool IsCompleted
+    {
+        get { return true; }
+    }
+}
+
+public class LongExecution : ICommand
+{
+    private int n = 15;
+
+    public void Execute()
+    {
+        if (n > 0)
+        {
+            Thread.Sleep(100); 
+            Console.WriteLine($"{n}");
+            n--;
+        }
+    }
+
+    public bool IsCompleted 
+    {
+        get { return n==0; }
+    }
+}
+public class Test1 : ICommand
+{
+    public void Execute()
+    {
+        Thread.Sleep(180);
+        Console.WriteLine($"{122 / 2} = 61");
+    }
+
+    public bool IsCompleted 
+    {
+        get { return true; }
+    }
+}
+
+public class Test2 : ICommand
+{
+    public void Execute()
+    {
+        Thread.Sleep(180);
+        Console.WriteLine($"{20 / 5} = 4");
+    }
+
+    public bool IsCompleted 
+    {
+        get { return true; }
+    }
+}
+
+#!csharp
+
+ServerThread testServer = new ServerThread();
+
+testServer.AddCommand(new Test1());
+testServer.AddCommand(new LongExecution());
+testServer.AddCommand(new SoftStop { serverThread = testServer });
+//testServer.AddCommand(new HardStop { serverThread = testServer });
+testServer.AddCommand(new Test1());
+testServer.AddCommand(new Test2());
+Thread.Sleep(800);
+testServer.AddCommand(new Test1());
+testServer.AddCommand(new Test2());
+Thread.Sleep(900);
+testServer.AddCommand(new Test1());
+testServer.AddCommand(new Test2());
+testServer.threadServerLogic.Join();
+testServer.AddCommand(new Test1());
+testServer.AddCommand(new Test2());
+Console.WriteLine("Сервер выключен");
+
+#!csharp
+
+ServerThread testServer = new ServerThread();
+
+testServer.AddCommand(new Test1());
+testServer.AddCommand(new LongExecution());
+//testServer.AddCommand(new SoftStop { serverThread = testServer });
+testServer.AddCommand(new HardStop { serverThread = testServer });
+testServer.AddCommand(new Test1());
+testServer.AddCommand(new Test2());
+Thread.Sleep(800);
+testServer.AddCommand(new Test1());
+testServer.AddCommand(new Test2());
+testServer.threadServerLogic.Join();
+Console.WriteLine("Сервер выключен");
 
 #!markdown
 
