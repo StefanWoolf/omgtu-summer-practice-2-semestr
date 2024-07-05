@@ -1,0 +1,338 @@
+#!meta
+
+{"kernelInfo":{"defaultKernelName":"csharp","items":[{"aliases":[],"languageName":"csharp","name":"csharp"}]}}
+
+#!markdown
+
+# Практическая работа №9. Реализация длительных операций.
+
+**Цель:** Предоставить возможность выполннеия команд, для полного завершения которых требуется более одного вызова Execute.
+
+**Результаты:** После выполнения работы Вы сможете:
+1. Выполнять длительные опреации в отдельном потоке без монопольного использования потока в течение длительного времени.
+3. Прерывать выполнение таких команд. 
+
+
+## Задание.
+Если для полного выполнения командв потребуется более одного вызова Execute, необходимо такую команду добавить в планировщик.
+
+Для иллюстрации выполнненой работы определить команду
+
+#!csharp
+
+using System;
+using System.Collections.Concurrent;
+using System.Threading;
+
+public interface ICommand
+{
+    void Execute();
+    bool IsCompleted { get; }
+}
+
+public interface IScheduler
+{
+    bool HasCommand();
+    ICommand Select();
+    void Add(ICommand cmd);
+    bool AllCommandsComplet();
+}
+
+public class Scheduler : IScheduler
+{
+    public ConcurrentQueue<ICommand> queueCommands = new ConcurrentQueue<ICommand>();
+
+    public bool HasCommand()
+    {
+        return !queueCommands.IsEmpty;
+    }
+
+    public ICommand Select()
+    {
+        if (queueCommands.TryDequeue(out ICommand cmd))
+        {
+            return cmd;
+        }
+        return null;
+    }
+
+    public void Add(ICommand cmd)
+    {
+        queueCommands.Enqueue(cmd);
+    }
+
+    public bool AllCommandsComplet()
+    {
+        foreach (var cmd in queueCommands)
+        {
+            if (!cmd.IsCompleted)
+                return false;
+        }
+        return true;
+    }
+}
+
+public class RepeatingCommand : ICommand
+{
+    ICommand Command;
+    IScheduler Scheduler;
+
+    public RepeatingCommand(ICommand command, IScheduler scheduler)
+    {
+        Command = command;
+        Scheduler = scheduler;
+    }
+
+    public void Execute()
+    {
+        Command.Execute();
+        if (!Command.IsCompleted)
+        {
+            Scheduler.Add(this);
+        }
+    }
+
+    public bool IsCompleted
+    {
+        get { return Command.IsCompleted; }
+    }
+}
+
+public class ServerThread
+{
+    public Thread threadServerLogic { get; set; }
+    public BlockingCollection<ICommand> queueServerCommands = new BlockingCollection<ICommand>();
+    ManualResetEvent flag = new ManualResetEvent(false);
+    ManualResetEvent hardStopFlag = new ManualResetEvent(false);
+    ManualResetEvent softStopFlag = new ManualResetEvent(false);
+    public IScheduler scheduler = new Scheduler();
+
+
+   public ServerThread()
+    {
+        threadServerLogic = new Thread(() => RunServer());
+        threadServerLogic.Start();
+    }
+
+    public void RunServer()
+    {
+        while (true)
+        {
+            flag.WaitOne();
+            flag.Reset();
+
+            if (hardStopFlag.WaitOne(0))
+                break;
+
+            if (softStopFlag.WaitOne(0))
+            {
+                Console.WriteLine("Плавная остановка сервера");
+                CompleteCommands();
+                break;
+            }
+
+            ICommand command;
+            while (queueServerCommands.TryTake(out command, TimeSpan.Zero))
+            {
+                try
+                {
+                    if (hardStopFlag.WaitOne(0))
+                        break;
+                    command.Execute();
+                }
+                catch (Exception ex)
+                {
+                    HandleException(command, ex);
+                }
+            }
+
+            if (hardStopFlag.WaitOne(0))
+                break;
+
+            while (scheduler.HasCommand())
+            {
+                if (hardStopFlag.WaitOne(0))
+                    break;
+
+                ICommand schedCommand = scheduler.Select();
+                schedCommand.Execute();
+            }
+        }
+    }
+
+    private void CompleteCommands()
+    {
+        while (scheduler.HasCommand())
+        {
+            ICommand schedCommand = scheduler.Select();
+            schedCommand?.Execute();
+        }
+
+        while (!queueServerCommands.IsCompleted && queueServerCommands.TryTake(out ICommand command))
+        {
+            command.Execute();
+        }
+    }
+
+    public void AddCommand(ICommand command)
+    {
+        if (!queueServerCommands.IsAddingCompleted)
+        {
+            queueServerCommands.Add(command);
+            Console.WriteLine($"Команда: {command.GetType().Name} добавлена в очередь");
+        }
+        else
+        {
+            Console.WriteLine($"Невозможно добавить команду: {command.GetType().Name} (очередь завершена)");
+        }
+        flag.Set();
+    }
+
+    public void HardStopHelp()
+    {
+        hardStopFlag.Set();
+        flag.Set();
+        queueServerCommands.CompleteAdding();
+        Console.WriteLine("Добавление в очередь прекращено");
+    }
+
+    public void SoftStopHelp()
+    {
+        softStopFlag.Set();
+        flag.Set();
+        //queueServerCommands.CompleteAdding();
+        //Console.WriteLine("Добавление в очередь прекращено");
+    }
+
+    public void HandleException(ICommand command, Exception ex)
+    {
+        Console.WriteLine($"Сработало исключение для команды {command.GetType().Name} | {ex.Message}");
+    }
+}
+
+public class HardStop : ICommand
+{
+    public ServerThread serverThread { get; set; }
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread == serverThread.threadServerLogic)
+        {
+            Console.WriteLine("ЖЕСТКАЯ ОСТАНОВКА!!!");
+            serverThread.HardStopHelp();
+        }
+        else
+            throw new InvalidOperationException("ERROR: HardStop может выполняться только потоком сервера");
+    }
+
+    public bool IsCompleted
+    {
+        get { return true; }
+    }
+}
+
+public class SoftStop : ICommand
+{
+    public ServerThread serverThread { get; set; }
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread == serverThread.threadServerLogic)
+        {
+            Console.WriteLine("НАЧАЛАСЬ ПЛАВНАЯ ОСТАНОВКА!!!");
+            serverThread.SoftStopHelp();
+        }
+        else
+            throw new InvalidOperationException("ERROR: SoftStop может выполняться только потоком сервера");
+    }
+
+    public bool IsCompleted
+    {
+        get { return true; }
+    }
+}
+
+public class LongExecution : ICommand
+{
+    private int n = 15;
+
+    public void Execute()
+    {
+        if (n > 0)
+        {
+            Thread.Sleep(100); 
+            Console.WriteLine($"{n}");
+            n--;
+        }
+    }
+
+    public bool IsCompleted 
+    {
+        get { return n==0; }
+    }
+}
+public class Test1 : ICommand
+{
+    public void Execute()
+    {
+        Thread.Sleep(180);
+        Console.WriteLine($"{122 / 2} = 61");
+    }
+
+    public bool IsCompleted 
+    {
+        get { return true; }
+    }
+}
+
+public class Test2 : ICommand
+{
+    public void Execute()
+    {
+        Thread.Sleep(180);
+        Console.WriteLine($"{20 / 5} = 4");
+    }
+
+    public bool IsCompleted 
+    {
+        get { return true; }
+    }
+}
+
+public record TestCommand(int Id) : ICommand
+{
+    private int counter = 0;
+
+    public void Execute()
+    {
+        Console.WriteLine($"Поток {Id} вызов {++counter}");
+    }
+
+    public bool IsCompleted
+    {
+        get { return counter >= 3; }
+    }
+}
+
+#!csharp
+
+ServerThread serverTest = new ServerThread();
+
+for (int i = 1; i <= 5; i++)
+    serverTest.AddCommand(new RepeatingCommand(new TestCommand(i), serverTest.scheduler));
+
+Thread.Sleep(800);
+
+serverTest.AddCommand(new HardStop { serverThread = serverTest });
+serverTest.threadServerLogic.Join(); 
+Console.WriteLine("Тест прошел успешно!");
+
+#!markdown
+
+Необходимо проиллюстрировать выполнение 5 экземпляров TestCommand 3 раза, затем остановить поток с помощью HardStop.
+
+#!markdown
+
+Выполнение программы: 
+
+![alt text](image.png)
